@@ -1,4 +1,7 @@
-plugins { id 'fabric-loom' version '1.11.9' }
+plugins {
+    id 'net.fabricmc.fabric-loom' version '1.19.4'
+    id 'java'
+}
 base { archivesName = 'jmchunkbridge-fabric-26.3' }
 java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
 dependencies {
