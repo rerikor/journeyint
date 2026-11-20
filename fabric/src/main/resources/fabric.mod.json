@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"jmchunkbridge","version":"1.0.0","name":"JourneyMap Chunk Bridge","environment":"client","entrypoints":{"client":["dev.rerikor.jmbridge.FabricBridge"]},"depends":{"fabricloader":">=0.19.5","minecraft":"26.3","fabric-api":"*","journeymap":">=26.3-6.0.10"}}

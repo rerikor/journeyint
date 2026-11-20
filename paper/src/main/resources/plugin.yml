@@ -1,0 +1,13 @@
+name: JMChunkBridge
+version: 1.0.0
+main: dev.rerikor.jmbridge.PaperBridge
+api-version: '26.2'
+description: Streams existing terrain to a JourneyMap Fabric client
+commands:
+  jmbridge:
+    description: Scan an already generated area
+    usage: /jmbridge start <radius> [centerX centerZ] | stop | status
+    permission: jmbridge.admin
+permissions:
+  jmbridge.admin:
+    default: op
