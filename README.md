@@ -38,3 +38,9 @@ Source project for a server→client **surface-map** bridge using JourneyMap 6.0
 Requires JDK 25 and Gradle 9.6.0 or newer. `gradle :paper:build :fabric:build`.
 
 The supplied JourneyMap mod is a **compile-only** dependency from Modrinth Maven; its classes are not redistributed in the bridge. Uploaded third-party JARs are not included.
+
+## Fast pipeline update
+
+Server now keeps up to 12 chunks in flight (up to 4 newly requested per server tick), tracking ACKs by chunk coordinates instead of waiting for each chunk sequentially. The client receiver and wire format are unchanged. A 30-second ACK timeout stops the scan on stalled rendering. This is a throughput experiment, not a guaranteed performance target. If the client stutters, lower WINDOW in PaperBridge.java to 4 or 8.
+
+Build status: source patch only; not compiled or runtime-tested in this environment. Replace BOTH JARs only after a successful GitHub Actions build; existing Fabric receiver is compatible with this server protocol.

@@ -21,6 +21,9 @@ import java.util.zip.DeflaterOutputStream;
 public final class PaperBridge extends JavaPlugin implements PluginMessageListener {
     private static final String CHANNEL = "jmbridge:data";
     private static final int MAGIC = 0x4a4d4232;
+    private static final int WINDOW = 12;
+    private static final int STARTS_PER_TICK = 4;
+    private static final long ACK_TIMEOUT_MS = 30000;
     private final Map<UUID, Scan> scans = new HashMap<>();
 
     @Override public void onEnable() {
@@ -38,7 +41,7 @@ public final class PaperBridge extends JavaPlugin implements PluginMessageListen
         }
         if (args.length == 1 && args[0].equalsIgnoreCase("status")) {
             Scan s = scans.get(p.getUniqueId());
-            p.sendMessage(s == null ? "[JMBridge] Idle" : "[JMBridge] " + s.acked + "/" + s.total + " mapped, " + s.missing + " skipped"); return true;
+            p.sendMessage(s == null ? "[JMBridge] Idle" : "[JMBridge] " + s.acked + "/" + s.total + " mapped, " + s.missing + " skipped, " + s.pending.size() + " in flight"); return true;
         }
         if (args.length < 2 || args.length > 4 || !args[0].equalsIgnoreCase("start")) {
             p.sendMessage("/jmbridge start <radius> [centerX centerZ] | stop | status"); return true;
@@ -59,41 +62,77 @@ public final class PaperBridge extends JavaPlugin implements PluginMessageListen
 
     @Override public void onPluginMessageReceived(String channel, Player p, byte[] bytes) {
         if (!CHANNEL.equals(channel) || bytes.length != 13) return;
-        Scan s = scans.get(p.getUniqueId()); if (s == null || !s.waiting) return;
+        Scan s = scans.get(p.getUniqueId()); if (s == null) return;
         try {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(bytes));
             if (in.readInt() != MAGIC || in.readUnsignedByte() != 2) return;
-            if (in.readInt() != s.pendingX || in.readInt() != s.pendingZ) return;
-            s.waiting = false; s.loading = false; s.acked++;
-            if (s.acked % 256 == 0) p.sendMessage("[JMBridge] " + s.acked + "/" + s.total);
+            int cx = in.readInt(), cz = in.readInt();
+            long key = key(cx, cz);
+            if (s.pending.remove(key) != null) {
+                s.acked++;
+                if (s.acked % 256 == 0) p.sendMessage("[JMBridge] " + s.acked + "/" + s.total);
+            }
         } catch (IOException ignored) {}
     }
 
+    private static long key(int x, int z) {
+        return ((long)x << 32) ^ (z & 0xffffffffL);
+    }
+
     private void tick() {
+        long now = System.currentTimeMillis();
         for (Iterator<Map.Entry<UUID,Scan>> it = scans.entrySet().iterator(); it.hasNext();) {
-            var e = it.next(); Player p = Bukkit.getPlayer(e.getKey()); Scan s = e.getValue();
-            if (p == null || !p.isOnline() || !p.getWorld().equals(s.world)) { it.remove(); continue; }
-            if (s.loading || s.waiting) {
-                if (s.waiting && System.currentTimeMillis() - s.sentAt > 15000) {
-                    p.sendMessage("[JMBridge] Client didn't acknowledge data; stopping (check client mod)"); it.remove();
-                }
+            var e = it.next();
+            Player p = Bukkit.getPlayer(e.getKey());
+            Scan s = e.getValue();
+            if (p == null || !p.isOnline() || !p.getWorld().equals(s.world)) {
+                it.remove();
                 continue;
             }
-            if (s.z > s.maxZ) { p.sendMessage("[JMBridge] Done: " + s.acked + " mapped, " + s.missing + " skipped"); it.remove(); continue; }
-            int x = s.x, z = s.z;
-            if (++s.x > s.maxX) { s.x = s.minX; s.z++; }
-            if (!s.world.isChunkGenerated(x,z)) { s.missing++; continue; }
-            s.loading = true;
-            s.world.getChunkAtAsync(x,z,false).whenComplete((chunk, error) -> Bukkit.getScheduler().runTask(this, () -> {
-                if (scans.get(p.getUniqueId()) != s || !p.isOnline()) return;
-                if (chunk == null || error != null) { s.loading = false; s.missing++; return; }
-                try {
-                    byte[] data = encode(chunk);
-                    if (data.length > 30000) { s.loading = false; s.missing++; getLogger().warning("Too large chunk " + x + "," + z); return; }
-                    s.pendingX = x; s.pendingZ = z; s.waiting = true; s.sentAt = System.currentTimeMillis();
-                    p.sendPluginMessage(this, CHANNEL, data);
-                } catch (Exception ex) { s.loading = false; s.missing++; getLogger().warning("Encoding " + x + "," + z + ": " + ex); }
-            }));
+            if (s.pending.values().stream().anyMatch(sent -> sent > 0 && now - sent > ACK_TIMEOUT_MS)) {
+                p.sendMessage("[JMBridge] ACK timeout; stopped. Check client log.");
+                it.remove();
+                continue;
+            }
+            int started = 0;
+            while (s.pending.size() < WINDOW && started < STARTS_PER_TICK && s.z <= s.maxZ) {
+                int x = s.x, z = s.z;
+                if (++s.x > s.maxX) { s.x = s.minX; s.z++; }
+                if (!s.world.isChunkGenerated(x,z)) { s.missing++; continue; }
+                long chunkKey = key(x,z);
+                s.pending.put(chunkKey, 0L); // reserve slot before async load
+                started++;
+                s.world.getChunkAtAsync(x,z,false).whenComplete((chunk, error) ->
+                    Bukkit.getScheduler().runTask(this, () -> {
+                        if (scans.get(p.getUniqueId()) != s || !p.isOnline()) return;
+                        if (!s.pending.containsKey(chunkKey)) return;
+                        if (chunk == null || error != null) {
+                            s.pending.remove(chunkKey);
+                            s.missing++;
+                            return;
+                        }
+                        try {
+                            byte[] data = encode(chunk);
+                            if (data.length > 30000) {
+                                s.pending.remove(chunkKey);
+                                s.missing++;
+                                getLogger().warning("Too large chunk " + x + "," + z);
+                                return;
+                            }
+                            s.pending.put(chunkKey, System.currentTimeMillis());
+                            p.sendPluginMessage(this, CHANNEL, data);
+                        } catch (Exception ex) {
+                            s.pending.remove(chunkKey);
+                            s.missing++;
+                            getLogger().warning("Encoding " + x + "," + z + ": " + ex);
+                        }
+                    })
+                );
+            }
+            if (s.z > s.maxZ && s.pending.isEmpty()) {
+                p.sendMessage("[JMBridge] Done: " + s.acked + " mapped, " + s.missing + " skipped");
+                it.remove();
+            }
         }
     }
 
@@ -140,7 +179,8 @@ public final class PaperBridge extends JavaPlugin implements PluginMessageListen
 
     private static final class Scan {
         final World world; final int minX,maxX,maxZ; final long total;
-        int x,z,pendingX,pendingZ,acked,missing; boolean loading,waiting; long sentAt;
+        int x,z,acked,missing;
+        final Map<Long,Long> pending = new HashMap<>();
         Scan(World world,int minX,int maxX,int minZ,int maxZ) {
             this.world=world;this.minX=minX;this.maxX=maxX;this.maxZ=maxZ;this.x=minX;this.z=minZ;
             this.total=(long)(maxX-minX+1)*(maxZ-minZ+1);
