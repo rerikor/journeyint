@@ -108,18 +108,10 @@ public final class FabricBridge implements ClientModInitializer {
                 }
             }
             String biome = in.readUTF();
-            // Set the correct biome in every sample cell. Blocks at surface heights
-            // are what the JourneyMap surface renderer queries for grass/water tint.
-            try {
-                var registry = mc.level.registryAccess().lookupOrThrow(Registries.BIOME);
-                var holder = registry.get(ResourceKey.create(Registries.BIOME, Identifier.parse(biome)));
-                if (holder.isPresent()) {
-                    int sectionIndex = (top >> 4) - mc.level.getMinSectionY();
-                    if (sectionIndex >= 0 && sectionIndex < fake.getSections().length) {
-                        fake.getSections()[sectionIndex].setBiome(x >> 2, (top & 15) >> 2, z >> 2, holder.get());
-                    }
-                }
-            } catch (RuntimeException ignored) {}
+            // The biome name is retained in the wire format, but Minecraft 26.3
+            // no longer exposes LevelChunkSection#setBiome. Do not mutate the
+            // section biome palette here; default client biome is used for tint.
+
         }
         JMChunkSnapshot snap=JMChunkSnapshot.fromLevelChunk(fake,null);
         SnapshotChunkMD md=new SnapshotChunkMD(mc.level,snap,true) {
